@@ -756,6 +756,7 @@ class CriticRayActorBase(RayActor):
             init_value_head=strategy.args.pretrain == strategy.args.critic_pretrain,
             packing_samples=True,
         )
+        
         # configure optimizer
         critic_optim = strategy.create_optimizer(
             critic, lr=args.critic_learning_rate, betas=args.adam_betas, weight_decay=args.l2

@@ -26,7 +26,7 @@ from torch.distributed.distributed_c10d import (
     ProcessGroup,
     Store,
     _new_process_group_helper,
-    _shutdown_backend,
+    destroy_process_group,
     _unregister_all_process_groups,
     _unregister_process_group,
     _update_default_pg,
@@ -140,7 +140,7 @@ def orz_destroy_process_group(group: Optional[ProcessGroup] = None):
         # order because ncclCommAbort() was a 'collective' call in some
         # versions of NCCL.
         for pg_to_shutdown in sorted(_world.pg_names, key=lambda x: _world.pg_names[x], reverse=True):
-            _shutdown_backend(pg_to_shutdown)
+            destroy_process_group(pg_to_shutdown)
 
         _update_default_pg(None)
         _world.pg_map.clear()
@@ -163,7 +163,7 @@ def orz_destroy_process_group(group: Optional[ProcessGroup] = None):
         # process group is in good state, we aren't dealing with failures.
         _world.group_count = 0
     else:
-        _shutdown_backend(pg)
+        destroy_process_group(pg)
         del _world.pg_map[pg]
         del _world.pg_names[pg]
         del _world.pg_group_ranks[pg]
