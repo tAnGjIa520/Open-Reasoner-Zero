@@ -6,7 +6,7 @@ class LLMActor:
         import vllm
 
         self.__version__ = vllm.__version__
-        assert self.__version__ >= "0.4.1", "OpenRLHF only supports vLLM >= 0.4.1"
+        # assert self.__version__ >= "0.4.1", "OpenRLHF only supports vLLM >= 0.4.1"
 
         self.use_gpu_executor = kwargs["tensor_parallel_size"] == 1
 
