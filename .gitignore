@@ -29,6 +29,7 @@ cmake-build-*/
 # IntelliJ
 out/
 
+orz_*
 # mpeltonen/sbt-idea plugin
 .idea_modules/
 
