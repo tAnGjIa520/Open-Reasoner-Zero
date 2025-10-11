@@ -43,6 +43,8 @@ class PPOExpConfig(BasePPOExpConfig):
     colocate_actor_ref: bool = True
     vllm_num_engines: int = total_num_nodes
     vllm_tensor_parallel_size: int = 1
+    # vllm_tensor_parallel_size: int = 8
+    
     adam_offload: bool = False
     zero_stage: int = 3
 
@@ -50,17 +52,20 @@ class PPOExpConfig(BasePPOExpConfig):
     pretrain: Optional[str] = "Qwen/Qwen2.5-0.5B" # TODO: or put your downloaded model path here!
     reward_pretrain: Optional[str] = None
     save_interval: int = 50
-    ckpt_path: str = f"orz_ckpt/{file_name}"
-    save_path: str = f"orz_ckpt/{file_name}"
-    tensorboard_log_dir: str = f"orz_logs/{file_name}"
+    ckpt_path: str = f"orz_ckpt_1gpu_debug/{file_name}"
+    save_path: str = f"orz_ckpt_1gpu_debug/{file_name}"
+    tensorboard_log_dir: str = f"orz_logs_1gpu_debug/{file_name}"
 
     # MathTrain dataset and Math500 eval dataset
     # data related settings
     prompt_data: ListConfig = ListConfig([
-        "data/orz_math_57k_collected.json",
+        # "data/orz_math_57k_collected.json",
+        "data/jericho_dataset_4games_1.4k_20251012.json", # TODO
+        
     ])
     eval_prompt_data: ListConfig = ListConfig(
         [
+            "data/eval_data/eval_jericho_dataset_4games_1.4k_20251012.json", # TODO
             "data/eval_data/math500.json",
             "data/eval_data/aime2024.json",
             "data/eval_data/gpqa_diamond.json",
@@ -108,7 +113,9 @@ class PPOExpConfig(BasePPOExpConfig):
     # grpo related settings
     use_grpo: bool = False
 
-    gpu_memory_utilization: float = 0.75
+    # gpu_memory_utilization: float = 0.75
+    gpu_memory_utilization: float = 0.4
+    
     critic_pretrain: Optional[str] = "" if use_grpo else pretrain
 
     gamma: float = 1.0
