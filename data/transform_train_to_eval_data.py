@@ -79,12 +79,17 @@ def transform_jericho_dataset(input_file_path, output_file_path):
 if __name__ == "__main__":
     # 定义输入和输出文件路径
     # 请确保将 input_path 设置为您的实际文件路径
-    input_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his10_4games_1.8k_20251013_instruct.json'
+    # input_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his10_4games_1.8k_20251013_instruct.json'
     
     # 建议将输出文件保存在脚本运行的当前目录下，或指定一个您有权限写入的路径
-    output_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/eval_data/eval_jericho_dataset_his10_4games_1.8k_20251013_instruct.json'
+    # output_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/eval_data/eval_jericho_dataset_his10_4games_1.8k_20251013_instruct.json'
     # output_path = 'jericho_dataset_transformed.json'
     
+    input_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his4_11games_20k_20251020_instruct.json'
+    output_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/eval_data/eval_jericho_dataset_his4_11games_20k_20251020.json'
+    
+
+
 
     # 检查输入文件是否存在，如果不存在，则创建一个示例文件用于演示
     if not os.path.exists(input_path):

@@ -73,11 +73,15 @@ if __name__ == "__main__":
     # --- 请在此处配置您的文件路径 ---
     
     # 原始训练数据文件路径
-    train_input_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his10_4games_1.8k_20251013.json'
+    # train_input_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his10_4games_1.8k_20251013.json'
+    train_input_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his4_11games_20k_20251020.json'
+    
     
     
     # 定义新生成的文件名，在原文件名后添加 "_instruct" 以作区分
-    train_output_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his10_4games_1.8k_20251013_instruct.json'
+    # train_output_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his10_4games_1.8k_20251013_instruct.json'
+    train_output_path = '/mnt/afs/wanzunian/niuyazhe/puyuan/Open-Reasoner-Zero/data/jericho_dataset_his4_11games_20k_20251020_instruct.json'
+    
 
     # 检查输入文件是否存在
     if not os.path.exists(train_input_path):
