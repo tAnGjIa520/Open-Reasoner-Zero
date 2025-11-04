@@ -125,7 +125,7 @@ class PPOExpConfig(BasePPOExpConfig):
     # data related settings
     prompt_data: ListConfig = ListConfig(
         [
-            "data/orz_math_57k_collected.json",
+            # "data/orz_math_57k_collected.json",  # TODO
             # "data/jericho_dataset_4games_1.4k_instruct_20251012.json", # TODO
             # "data/jericho_dataset_his4_4games_1.8k_20251020_instruct.json", # TODO
             "data/jericho_dataset_his4_11games_20k_20251020_instruct.json", # TODO
@@ -143,9 +143,9 @@ class PPOExpConfig(BasePPOExpConfig):
             "data/eval_data/gpqa_diamond.json",
         ]
     )
-    # prompt_data_probs: ListConfig = ListConfig([1.0])
+    prompt_data_probs: ListConfig = ListConfig([1.0])
     
-    prompt_data_probs: ListConfig = ListConfig([0.2, 0.8])  # TODO
+    # prompt_data_probs: ListConfig = ListConfig([0.2, 0.8])  # TODO
     
 
     # ppo related settings
