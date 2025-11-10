@@ -559,3 +559,4 @@ if __name__ == "__main__":
     if not os.path.exists(exp.cfg.ckpt_path):
         os.makedirs(exp.cfg.ckpt_path, exist_ok=True)
     asyncio.run(exp.run())
+# /mnt/shared-storage-user/tangjia/orz/Open-Reasoner-Zero/playground/orz_14m_ppo_mini.py

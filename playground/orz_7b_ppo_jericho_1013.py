@@ -36,7 +36,7 @@ from orz.ppo import RayPPOTrainer
 from orz.ppo.tools.math_utils import is_equal, solution2answer
 from orz.ppo.utils import check_reflection_pattern
 from playground.zero_setting_base import CustomDataset, EvalCustomDataset
-
+# /mnt/shared-storage-user/tangjia/orz/Open-Reasoner-Zero/playground/orz_7b_ppo_jericho_1013.py
 DEBUG_MODE = False if os.environ.get("DEBUG_MODE", "False") == "False" else True  # Global debug flag
 
 file_name = f"{'debug_' if DEBUG_MODE else ''}{os.path.splitext(os.path.basename(__file__))[0]}"
@@ -114,7 +114,7 @@ class PPOExpConfig(BasePPOExpConfig):
     zero_stage: int = 3
 
     # path related settings
-    pretrain: Optional[str] = "Qwen/Qwen2.5-7B" # TODO: or put your downloaded model path here!
+    pretrain: Optional[str] = "./model/Qwen/Qwen2.5-7B" # TODO: or put your downloaded model path here!
     reward_pretrain: Optional[str] = None
     save_interval: int = 50
     ckpt_path: str = f"jericho_his10_orz_20251013_ckpt/{file_name}"

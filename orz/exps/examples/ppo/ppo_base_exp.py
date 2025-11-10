@@ -228,4 +228,5 @@ class BasePPOExp(BaseExp):
         await self.trainer.build_models(self.PolicyRayActor, self.CriticRayActor, self.RefRayActor, self.RewardRayActor)
 
         # initialize the trainer and enter the training loop
+        # /mnt/shared-storage-user/tangjia/orz/Open-Reasoner-Zero/playground/orz_0p5b_ppo_jericho_1012_1gpu.py
         await self.trainer.train()

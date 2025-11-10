@@ -81,6 +81,13 @@ class RayPPOTrainer:
             async with Timer("Offload policy model to cpu"):
                 await self.policy_model.offload_to_cpu()
 
+        # Save initial model before training (iter0)
+        logger.info("Saving initial model checkpoint (iter0)")
+        await self.policy_model.async_save_model(self.tokenizer, 0)
+        if self.critic_model is not None:
+            await self.critic_model.async_save_model(self.tokenizer, 0)
+        logger.info("Successfully saved initial model checkpoint (iter0)")
+
         # 2. main training loop
         consumed_samples = 0
         num_rollouts_per_episodes = (

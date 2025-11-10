@@ -33,6 +33,7 @@ from typing_extensions import override
 
 from orz.exps.examples.ppo.ppo_base_exp import BasePPOExp, BasePPOExpConfig
 from orz.ppo import RayPPOTrainer
+from orz.ppo.evaluation import EvalConfig, eval_model
 from orz.ppo.tools.math_utils import is_equal, solution2answer
 from orz.ppo.utils import check_reflection_pattern
 from playground.zero_setting_base import CustomDataset, EvalCustomDataset
@@ -396,107 +397,30 @@ class CustomRewardTrainer(RayPPOTrainer):
 
     @override
     async def eval(self):
+        """
+        评估方法 - 调用独立的 eval_model 函数
+        """
         logger.info("Start evaluating on val set")
-        from vllm import SamplingParams
 
-        sampling_params = SamplingParams(
+        # 构建评估配置
+        config = EvalConfig(
+            model_path=None,  # 使用已有的 vllm_engines
+            vllm_engines=self.vllm_engines,  # 直接传入现有的引擎
+            vllm_num_engines=self.cfg.vllm_num_engines,
             temperature=self.cfg.temperature,
             top_p=self.cfg.top_p,
-            max_tokens=self.cfg.generate_max_len,
+            generate_max_len=self.cfg.generate_max_len,
+            max_len=self.cfg.max_len,
             stop=self.cfg.stop,
-            skip_special_tokens=False,
-            include_stop_str_in_output=True,
+            eval_dataset=self.eval_dataset,
+            eval_prompt_data=self.cfg.eval_prompt_data,
+            save_path=self.cfg.save_path,
+            global_step=self.global_step,
+            writer=self.writer,
         )
 
-        from torch.utils.data import DataLoader
-
-        dataset = self.eval_dataset
-        dataloader = DataLoader(dataset, batch_size=len(dataset), shuffle=False, drop_last=False)
-        prompt_pre_llm = (len(dataset) + self.cfg.vllm_num_engines - 1) // self.cfg.vllm_num_engines
-
-        output_for_save = []
-        log_dict = defaultdict(float)
-        for batch in dataloader:
-            prompts = list(batch[0])
-            answers = list(batch[1]["answer"])
-            file_names = list(batch[1]["file_name"])
-            outputs = []
-            for i, llm in enumerate(self.vllm_engines):
-                outputs.append(
-                    llm.generate.remote(
-                        prompts=prompts[i * prompt_pre_llm : (i + 1) * prompt_pre_llm], sampling_params=sampling_params
-                    )
-                )
-            outputs = await asyncio.gather(*outputs)
-            outputs = sum(outputs, [])
-
-            final_answers = []
-            pattern = re.compile(r"<answer>.*?(\\boxed{.*}).*?</answer>", re.DOTALL)
-            for output in outputs:
-                matches = re.findall(pattern, output.outputs[0].text)
-                if len(matches) > 0:
-                    final_answers.append(matches[-1])
-                else:
-                    final_answers.append("")
-
-            for prompt, output, final_answer, answer, file_name in zip(
-                prompts, outputs, final_answers, answers, file_names
-            ):
-                label = solution2answer(answer)
-                prefix_response = solution2answer(final_answer)
-                iscorrect = await is_equal(label, prefix_response, executor)
-                output_for_save.append(
-                    dict(
-                        prompt=prompt,
-                        output=output.outputs[0].text,
-                        final_answer=final_answer,
-                        answer=answer,
-                        iscorrect=iscorrect,
-                    )
-                )
-                log_dict[f"{file_name}/total_response_len_in_char"] += len(output.outputs[0].text)
-                log_dict[f"{file_name}/correct"] += iscorrect
-                log_dict[f"{file_name}/total"] += 1
-
-        # get all file_names from self.cfg.eval_prompt_data
-        all_file_names: List[str] = [
-            os.path.splitext(os.path.basename(file_path))[0] for file_path in self.cfg.eval_prompt_data
-        ]
-        for file_name in all_file_names:
-            log_dict[f"{file_name}/response_len_in_char"] = (
-                log_dict[f"{file_name}/total_response_len_in_char"] / log_dict[f"{file_name}/total"]
-            )
-            log_dict[f"{file_name}/accuracy"] = log_dict[f"{file_name}/correct"] / log_dict[f"{file_name}/total"]
-            log_dict.pop(f"{file_name}/total_response_len_in_char")
-            log_dict.pop(f"{file_name}/correct")
-            log_dict.pop(f"{file_name}/total")
-        # calculate average accuracy
-        log_dict["eval_accuracy"] = sum([log_dict[f"{file_name}/accuracy"] for file_name in all_file_names]) / len(
-            all_file_names
-        )
-
-        dump_file_name = f"eval_output_iter{self.global_step}"
-        # join all acc from all_file_names
-        for file_name in all_file_names:
-            dump_file_name += f"_{file_name}{log_dict[f'{file_name}/accuracy']:.4f}"
-        dump_file_name += ".jsonl"
-        # dump as jsonl
-        with open(
-            os.path.join(
-                self.cfg.save_path,
-                dump_file_name,
-            ),
-            "w",
-        ) as f:
-            for item in output_for_save:
-                f.write(
-                    json.dumps(item, ensure_ascii=False) + "\n",
-                )
-
-        logging_str = ",".join([f"{k}: {v:.4f}" for k, v in log_dict.items()])
-        logger.info(logging_str)
-        for k, v in log_dict.items():
-            self.writer.add_scalar(f"evals/{k}", v, self.global_step)
+        # 调用独立的评估函数
+        await eval_model(config, skip_engine_init=True)
 
 
 class PPOExp(BasePPOExp):

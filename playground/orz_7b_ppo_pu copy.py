@@ -96,6 +96,7 @@ class PPOExpConfig(BasePPOExpConfig):
     
     total_num_nodes: int =  8 # TODO
     
+
     # resource related settings
     ref_num_nodes: int = total_num_nodes
     ref_num_gpus_per_node: int = 1
@@ -108,45 +109,32 @@ class PPOExpConfig(BasePPOExpConfig):
     colocate_actor_ref: bool = True
     vllm_num_engines: int = total_num_nodes
     vllm_tensor_parallel_size: int = 1
-    # adam_offload: bool = False
-    adam_offload: bool = False # TODO
-    
+    adam_offload: bool = False
     zero_stage: int = 3
 
     # path related settings
-    pretrain: Optional[str] = "/mnt/shared-storage-user/tangjia/orz/Open-Reasoner-Zero/model/models--Qwen--Qwen2.5-7B/snapshots/e25af2efae60472008fbeaf5fb7c4274a87f78d4" # TODO: or put your downloaded model path here!
+    pretrain: Optional[str] = "Qwen/Qwen2.5-7B" # TODO: or put your downloaded model path here!
     reward_pretrain: Optional[str] = None
     save_interval: int = 50
-    ckpt_path: str = f"jericho_his4_orz_20251020_ckpt/{file_name}"
-    save_path: str = f"jericho_his4_orz_20251020_ckpt/{file_name}"
-    tensorboard_log_dir: str = f"jericho_his4_orz_20251020_logs/{file_name}"
+    ckpt_path: str = f"orz_ckpt/{file_name}"
+    save_path: str = f"orz_ckpt/{file_name}"
+    tensorboard_log_dir: str = f"orz_logs/{file_name}"
 
     # MathTrain dataset and Math500 eval dataset
     # data related settings
     prompt_data: ListConfig = ListConfig(
         [
             "data/orz_math_57k_collected.json",
-            # "data/jericho_dataset_4games_1.4k_instruct_20251012.json", # TODO
-            # "data/jericho_dataset_his4_4games_1.8k_20251020_instruct.json", # TODO
-            "data/jericho_dataset_his4_11games_20k_20251020_instruct.json", # TODO
-            
         ]
     )
     eval_prompt_data: ListConfig = ListConfig(
         [
-            # "data/eval_data/eval_jericho_dataset_4games_1.4k_instruct_20251012.json",  # TODO
-            # "data/eval_data/eval_jericho_dataset_his4_4games_1.8k_20251020_instruct.json",  # TODO
-            "data/eval_data/eval_jericho_dataset_his4_11games_20k_20251020_instruct.json",  # TODO
-            
             "data/eval_data/math500.json",
             "data/eval_data/aime2024.json",
             "data/eval_data/gpqa_diamond.json",
         ]
     )
-    # prompt_data_probs: ListConfig = ListConfig([1.0])
-    
-    prompt_data_probs: ListConfig = ListConfig([0.2, 0.8])  # TODO
-    
+    prompt_data_probs: ListConfig = ListConfig([1.0])
 
     # ppo related settings
     actor_learning_rate: float = 1e-6
@@ -163,11 +151,11 @@ class PPOExpConfig(BasePPOExpConfig):
     # micro_rollout_batch_size: int = 128 if not DEBUG_MODE else 128
 
     num_episodes: int = 20
-    # rollout_batch_size: int = 64 # 测试无oom
-    rollout_batch_size: int = 128
+    rollout_batch_size: int = 64
     n_samples_per_prompt: int = 64
-    micro_rollout_batch_size: int = 2 # 测试无oom
-    # micro_rollout_batch_size: int = 4
+    micro_rollout_batch_size: int = 2
+    
+    # micro_rollout_batch_size: int = 128
     
     policy_update_steps: int = 1
     critic_update_steps: int = 12 if not DEBUG_MODE else 1
@@ -180,11 +168,11 @@ class PPOExpConfig(BasePPOExpConfig):
     
     # use_kl_loss: bool = True
     use_kl_loss: bool = False
+    
     use_kl_estimator_k3: bool = True
 
     enable_eval: bool = True
-    # eval_interval: int = 10
-    eval_interval: int = 15
+    eval_interval: int = 10
 
     # generate related settings
     packing_max_len: int = 16384
@@ -200,8 +188,8 @@ class PPOExpConfig(BasePPOExpConfig):
 
     # gpu_memory_utilization: float = 0.75 if use_grpo else 0.7 if not DEBUG_MODE else 0.5
     
-    gpu_memory_utilization: float = 0.3 # TODO： 测试无oom
-    # gpu_memory_utilization: float = 0.4 # TODO： 测试有oom
+    gpu_memory_utilization: float = 0.3 # TODO
+    
     
     critic_pretrain: Optional[str] = "" if use_grpo else pretrain
 
