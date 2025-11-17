@@ -202,29 +202,9 @@ def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, averag
     per_token_prob_argmax = torch.exp(per_token_logps_argmax) #torch.gather(prob_logits, dim=2, index=labels_argmax.unsqueeze(2)).squeeze(2) #[B, M]
     per_token_prob_exceptargmax =  torch.ones_like(per_token_prob_argmax)* loss_mask - per_token_prob_argmax* loss_mask #[B, M]
     per_token_logp_exceptargmax = torch.log(per_token_prob_exceptargmax + 1e-100)
-        # --------- |A_o|_F, should be [B, 1] (with numerical stability clamps)
-    #prob_norm = torch.norm(prob_logits, dim=-1) # [B, M, V] -> [B, M]
-    prob_norm = torch.linalg.vector_norm(prob_logits, ord=2, dim=-1) # [B, M, V] -> [B, M], doing the same thing with previous line
-    prob_norm = prob_norm * loss_mask # [B, M], all other dims are zeros
-
-    # ===== Layer 1: Clamp the accumulated norm sum to prevent extreme values
-    prob_norm_sum = prob_norm.sum(-1) / loss_mask.sum(-1)  # [B, 1]
-    prob_norm_sum_clamped = torch.clamp(prob_norm_sum, max=200.0)
-
-    # ===== Layer 2: Clamp the squared mean to control the product with vocab_size
-    prob_norm2_mean = torch.square(prob_norm_sum_clamped)  # [B, 1]
-    prob_norm2_mean_clamped = torch.clamp(prob_norm2_mean, max=0.3)
-
-    # ===== Layer 3: Clamp the final product to stay within float16 safe range
-    A_norm_inner = V*prob_norm2_mean_clamped + (V-2)*torch.ones_like(prob_norm2_mean_clamped)
-    A_norm_inner_clamped = torch.clamp(A_norm_inner, max=50000.0)
-    A_norm = torch.sqrt(A_norm_inner_clamped)  # [B, 1], align with the shape of all other metrics
-
-    # ===== Layer 4: Detect and warn about overflow (should not happen now with clamps)
-    if torch.isinf(A_norm).any():
-        warnings.warn(f"WARNING: A_norm still contains inf values after clamping. "
-                     f"Logits shape: {logits.shape}, vocab_size: {V}, "
-                     f"A_norm values: {A_norm}")
+        # --------- |A_o|_F, should be [B] (Frobenius norm of probability distribution)
+    # Calculate Frobenius norm: sqrt(sum of all squared elements)
+    A_norm = torch.sqrt((prob_logits ** 2).sum(dim=(1, 2)))  # [B, M, V] -> [B]
 
         # ---------- |pi-e|_2, or
     #breakpoint()

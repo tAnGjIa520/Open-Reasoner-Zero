@@ -1,6 +1,5 @@
 """
-快速调试版本 - 使用 transformers 模型生成和分析 Learning Dynamics
-(替代 vLLM，直接获取完整 vocab_size 的 logits)
+独立评估模块 - 用于评估已训练的模型
 """
 
 import asyncio
@@ -18,8 +17,8 @@ import torch
 import ray
 from loguru import logger
 
-# 配置日志文件输出到 orz_dynamic_debug_log 目录
-log_dir = "orz_dynamic_debug_log"
+# 配置日志文件输出到 orz_dynamic_log 目录
+log_dir = "orz_dynamic_log"
 os.makedirs(log_dir, exist_ok=True)
 log_date = datetime.now().strftime("%Y%m%d")
 logger.add(
@@ -45,7 +44,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from orz.ppo.tools.math_utils import is_equal, solution2answer
 from orz.ppo.deepspeed_strategy import DeepspeedStrategy
 from dataset.eval_dataset import EvalCustomDataset
-from extracted_get_batch_logps import analyze_learning_dynamics
+from .extracted_get_batch_logps import analyze_learning_dynamics
 
 # Global executor for async operations
 executor = ThreadPoolExecutor(max_workers=64)
@@ -69,7 +68,6 @@ def extract_iter_from_path(checkpoint_path: str) -> int:
     Returns:
         iter 编号（int），如果无法提取则返回 0
     """
-    import re
     match = re.search(r'iter(\d+)', checkpoint_path)
     if match:
         return int(match.group(1))
@@ -167,7 +165,7 @@ def aggregate_multi_checkpoint_results(all_model_results: dict) -> dict:
     return aggregated
 
 
-def visualize_multi_checkpoint_trends(aggregated_data: dict, output_dir: str = "orz_dynamic_debug_log"):
+def visualize_multi_checkpoint_trends(aggregated_data: dict, output_dir: str = "eval_results"):
     """
     为每个数据集生成折线图对比，显示指标在不同 checkpoint 上的变化趋势
 
@@ -291,34 +289,41 @@ def visualize_multi_checkpoint_trends(aggregated_data: dict, output_dir: str = "
 
         logger.info(f"Trend visualization saved to: {figure_path}")
 
+    logger.info("=" * 80)
+
 
 @dataclass
 class EvaluatorConfig:
-    """快速调试配置类 - 使用 transformers 版本"""
+    """独立评估配置类"""
     # Model and tokenizer
-    model_path: str
-    tokenizer_path: Optional[str] = None
+    model_path: str  # checkpoint path or HF model name
+    tokenizer_path: Optional[str] = None  # if None, use model_path
 
-    # Generation settings - debug 版本缩短生成长度加快速度
+    # Generation settings
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
-    generate_max_len: int = 256  # 改短以加快推理
+    generate_max_len: int = 8000
+    do_sample: bool = True
 
     # Data settings
     eval_prompt_data: List[str] = field(default_factory=lambda: [
-        "data/eval_data/eval_jericho_dataset_his10_4games_1.8k_20251013_instruct.json",  # [对齐] Jericho 评估数据
-        "data/eval_data/math500.json",  # [对齐] 完全对应
-        "data/eval_data/aime2024.json",  # [对齐] 完全对应
-        "data/eval_data/gpqa_diamond.json",  # [对齐] 完全对应
+        "data/eval_data/eval_jericho_dataset_his10_4games_1.8k_20251013_instruct.json",
+        "data/eval_data/math500.json",
+        "data/eval_data/aime2024.json",
+        "data/eval_data/gpqa_diamond.json",
     ])
-    prompt_max_len: int = 2048  # [对齐] 完全对应
+    prompt_max_len: int = 2048
+    max_eval_samples: int = 5000  # 每个数据集的最大评估样本数
 
-    # Debug settings
-    debug_num_samples: int = 2  # 仅用前 2 个样本
+    # Learning Dynamics 样本收集设置
+    min_correct_samples: int = 30   # 正确答案的最小样本数
+    min_incorrect_samples: int = 10 # 错误答案的最小样本数
+    min_random_samples: int = 10    # 随机采样token的最小样本数
 
     # Output settings
-    output_dir: str = "orz_dynamic_debug_log"
+    output_dir: str = "orz_dynamic_log"
+    log_dir: str = "orz_dynamic_log"  # Log directory name
     save_detailed_results: bool = True
 
     # Visualization settings
@@ -334,7 +339,7 @@ class EvaluatorConfig:
 
 
 class Evaluator:
-    """快速调试版评估器 - 使用 transformers"""
+    """独立评估类，支持从checkpoint加载模型进行评估"""
 
     def __init__(
         self,
@@ -343,31 +348,51 @@ class Evaluator:
         eval_prompt_data: Optional[List[str]] = None,
         model=None,
         tokenizer=None,
-        debug_num_samples: int = 2,
         **kwargs
     ):
-        """初始化调试评估器"""
+        """
+        初始化评估器
+
+        支持多种初始化方式：
+        1. 传入 EvaluatorConfig 对象（保留原有方式）
+           Evaluator(config=EvaluatorConfig(...))
+
+        2. 传入必要参数，其他使用默认值
+           Evaluator(model_path="...", eval_prompt_data=[...])
+
+        3. 传入已加载的模型对象
+           Evaluator(model=my_model, tokenizer=my_tokenizer, eval_prompt_data=[...])
+
+        Args:
+            config: EvaluatorConfig 配置对象（可选）
+            model_path: 模型路径（可选，当不传 config 时使用）
+            eval_prompt_data: 评估数据路径列表（可选）
+            model: 已加载的 transformers 模型对象（可选）
+            tokenizer: 已加载的 tokenizer 对象（可选）
+            **kwargs: 其他 EvaluatorConfig 参数
+        """
         # Initialize Ray if not already done
         if not ray.is_initialized():
             ray.init()
 
         # 处理配置对象
         if config is not None:
+            # 使用传入的 config 对象
             self.cfg = config
         else:
+            # 从参数构建 config 对象
             if model_path is None and model is None:
                 raise ValueError("必须指定 model_path 或 model")
 
             config_kwargs = {
-                "model_path": model_path or "dummy_path",
+                "model_path": model_path or "dummy_path",  # 当使用预加载模型时，可以是占位符
                 "eval_prompt_data": eval_prompt_data or [
-                    "data/eval_data/eval_jericho_dataset_his10_4games_1.8k_20251013_instruct.json",
                     "data/eval_data/math500.json",
                     "data/eval_data/aime2024.json",
                     "data/eval_data/gpqa_diamond.json",
                 ],
-                "debug_num_samples": debug_num_samples,
             }
+            # 合并其他 kwargs
             config_kwargs.update(kwargs)
             self.cfg = EvaluatorConfig(**config_kwargs)
 
@@ -378,9 +403,7 @@ class Evaluator:
         self._user_provided_model = model
         self._user_provided_tokenizer = tokenizer
 
-        logger.info(f"Initializing Debug Evaluator with config: {self.cfg}")
-        logger.info(f"Debug mode: Only evaluating first {self.cfg.debug_num_samples} samples")
-        logger.info("Using transformers (not vLLM) for generation")
+        logger.info(f"Initializing Evaluator with config: {self.cfg}")
 
         # Load components
         if not self._user_provided_tokenizer:
@@ -389,7 +412,7 @@ class Evaluator:
             self._load_model()
         self._load_eval_datasets()
 
-        logger.info("Debug Evaluator initialization completed")
+        logger.info("Evaluator initialization completed")
 
     def _load_tokenizer(self):
         """Load tokenizer from pretrained model"""
@@ -412,21 +435,24 @@ class Evaluator:
         logger.info("Model loaded successfully")
 
     def _load_eval_datasets(self):
-        """Load evaluation datasets - debug 版本只加载部分数据"""
+        """Load evaluation datasets"""
         logger.info(f"Loading evaluation datasets from {self.cfg.eval_prompt_data}")
         dialogues = []
         for file_path in self.cfg.eval_prompt_data:
             logger.info(f"Loading dataset from {file_path}")
             with open(file_path, "r") as f:
                 loaded_data = json.load(f)
-                # debug 版本：仅保留前 N 个样本
-                loaded_data = loaded_data[:self.cfg.debug_num_samples]
-                logger.info(f"Debug mode: Only keeping first {len(loaded_data)} samples")
                 for item in loaded_data:
+                    # Add file name as metadata
                     item["file_name"] = os.path.splitext(os.path.basename(file_path))[0]
                 dialogues.extend(loaded_data)
 
-        logger.info(f"Loaded {len(dialogues)} samples from evaluation datasets (DEBUG MODE)")
+        logger.info(f"Loaded {len(dialogues)} samples from evaluation datasets")
+        logger.info(f"Sample collection strategy: 动态收集，直到各类别达到最小样本数或达到全局上限")
+        logger.info(f"  - Min correct samples: {self.cfg.min_correct_samples}")
+        logger.info(f"  - Min incorrect samples: {self.cfg.min_incorrect_samples}")
+        logger.info(f"  - Min random samples: {self.cfg.min_random_samples}")
+        logger.info(f"  - Max evaluation samples per dataset: {self.cfg.max_eval_samples}")
 
         # Create strategy object for dataset processing
         strategy = DeepspeedStrategy()
@@ -440,61 +466,6 @@ class Evaluator:
             num_processors=1,
         )
         logger.info(f"Processed {len(self.eval_dataset)} evaluation samples")
-
-    def _sample_random_tokens(self, logits, labels, token_ids, num_samples=5):
-        """
-        从生成的序列中随机采样 token 及其对应的 logits
-
-        Args:
-            logits: torch.FloatTensor, shape (1, seq_len, vocab_size)
-            labels: torch.LongTensor, shape (1, seq_len)
-            token_ids: list of generated token IDs
-            num_samples: 采样的 token 数量（默认 5）
-
-        Returns:
-            sampled_data: 字典，包含采样的 token 信息
-        """
-        import random
-
-        if logits is None or labels is None or token_ids is None:
-            return None
-
-        seq_len = len(token_ids)
-        valid_positions = [i for i in range(seq_len) if i < labels.shape[1] and labels[0, i] != -100]
-
-        if len(valid_positions) == 0:
-            return None
-
-        actual_samples = min(num_samples, len(valid_positions))
-        sampled_positions = sorted(random.sample(valid_positions, actual_samples))
-
-        sampled_data = {
-            'sample_positions': sampled_positions,
-            'sample_tokens': [],
-            'sample_logprobs': [],
-            'sample_token_names': [],
-            'sample_token_probs': [],
-        }
-
-        for pos in sampled_positions:
-            token_id = int(token_ids[pos])
-            logit_vector = logits[0, pos, :].detach().cpu()
-            log_probs = torch.nn.functional.log_softmax(logit_vector, dim=-1)
-            probs = torch.softmax(logit_vector, dim=-1)
-            token_logprob = log_probs[token_id].item()
-            token_prob = probs[token_id].item()
-
-            try:
-                token_name = self.tokenizer.decode([token_id]).strip()
-            except:
-                token_name = f"<unk_token_{token_id}>"
-
-            sampled_data['sample_tokens'].append(token_id)
-            sampled_data['sample_logprobs'].append(token_logprob)
-            sampled_data['sample_token_names'].append(token_name)
-            sampled_data['sample_token_probs'].append(token_prob)
-
-        return sampled_data
 
     async def _analyze_custom_sentence(self):
         """
@@ -524,7 +495,9 @@ class Evaluator:
 
         for file_path in self.cfg.custom_sentence_files:
             try:
-                logger.info(f"Processing custom sentence: {os.path.basename(file_path)}")
+                logger.info("\n" + "="*80)
+                logger.info(f"【Processing: {os.path.basename(file_path)}】")
+                logger.info("="*80)
 
                 # Step 1: 加载JSON文件
                 logger.info(f"Loading custom sentence from: {file_path}")
@@ -568,7 +541,7 @@ class Evaluator:
 
                 logger.info(f"Computed logits for {len(all_logits)} positions")
 
-                # Step 4: 拼接logits到完整序列位置
+                # Step 5: 拼接logits到完整序列位置
                 full_seq_len = len(prompt_ids) + len(response_ids)
                 logits_full = torch.zeros(1, full_seq_len, self.tokenizer.vocab_size)
 
@@ -576,7 +549,7 @@ class Evaluator:
                 for t, logit in enumerate(all_logits):
                     logits_full[0, len(prompt_ids) + t, :] = logit
 
-                # Step 5: 构造labels
+                # Step 6: 构造labels
                 labels = torch.tensor([prompt_ids + response_ids], dtype=torch.long)
                 # Mask prompt部分
                 labels[:, :len(prompt_ids)] = -100
@@ -584,14 +557,16 @@ class Evaluator:
                 logger.info(f"Logits shape: {logits_full.shape}")
                 logger.info(f"Labels shape: {labels.shape}")
 
-                # Step 6: Analyze Learning Dynamics
-                logger.info(f"Custom Sentence Learning Dynamics Analysis - {os.path.basename(file_path)}")
+                # Step 7: 分析Learning Dynamics
+                logger.info("\n" + "="*80)
+                logger.info(f"【Custom Sentence Learning Dynamics Analysis - {os.path.basename(file_path)}】")
+                logger.info("="*80 + "\n")
 
                 ld_result = analyze_learning_dynamics(
                     logits=logits_full,
                     labels=labels,
                     tokenizer=self.tokenizer,
-                    verbose=True
+                    verbose=self.cfg.verbose_learning_dynamics
                 )
 
                 # 提取关键指标
@@ -616,9 +591,83 @@ class Evaluator:
 
         return ld_custom_sentences
 
+    def _sample_random_tokens(self, logits, labels, token_ids, num_samples=5):
+        """
+        从生成的序列中随机采样 token 及其对应的 logits
+
+        Args:
+            logits: torch.FloatTensor, shape (1, seq_len, vocab_size)
+            labels: torch.LongTensor, shape (1, seq_len)
+            token_ids: list of generated token IDs
+            num_samples: 采样的 token 数量（默认 5）
+
+        Returns:
+            sampled_data: 字典，包含采样的 token 信息
+                {
+                    'sample_positions': [pos1, pos2, ...],
+                    'sample_tokens': [token_id1, token_id2, ...],
+                    'sample_logprobs': [logprob1, logprob2, ...],
+                    'sample_token_names': ['token_name1', 'token_name2', ...],
+                    'sample_token_probs': [prob1, prob2, ...],
+                }
+        """
+        import random
+
+        if logits is None or labels is None or token_ids is None:
+            return None
+
+        seq_len = len(token_ids)
+
+        # 有效位置数（非 -100 mask）
+        valid_positions = [i for i in range(seq_len) if i < labels.shape[1] and labels[0, i] != -100]
+
+        if len(valid_positions) == 0:
+            return None
+
+        # 确定实际采样数量
+        actual_samples = min(num_samples, len(valid_positions))
+
+        # 随机采样位置
+        sampled_positions = sorted(random.sample(valid_positions, actual_samples))
+
+        sampled_data = {
+            'sample_positions': sampled_positions,
+            'sample_tokens': [],
+            'sample_logprobs': [],
+            'sample_token_names': [],
+            'sample_token_probs': [],
+        }
+
+        for pos in sampled_positions:
+            token_id = int(token_ids[pos])
+
+            # 获取完整的 logits 向量（所有 vocab）
+            logit_vector = logits[0, pos, :].detach().cpu()
+
+            # 计算该位置的 log 概率和概率
+            log_probs = torch.nn.functional.log_softmax(logit_vector, dim=-1)
+            probs = torch.softmax(logit_vector, dim=-1)
+
+            # 获取该 token 的 log 概率
+            token_logprob = log_probs[token_id].item()
+            token_prob = probs[token_id].item()
+
+            # 获取 token 名称
+            try:
+                token_name = self.tokenizer.decode([token_id]).strip()
+            except:
+                token_name = f"<unk_token_{token_id}>"
+
+            sampled_data['sample_tokens'].append(token_id)
+            sampled_data['sample_logprobs'].append(token_logprob)
+            sampled_data['sample_token_names'].append(token_name)
+            sampled_data['sample_token_probs'].append(token_prob)
+
+        return sampled_data
+
     async def eval(self) -> dict:
-        """快速调试版评估"""
-        logger.info("Starting DEBUG evaluation on datasets (transformers mode)")
+        """执行评估"""
+        logger.info("Starting evaluation on datasets (transformers mode)")
         from torch.utils.data import DataLoader
 
         # Create dataloader
@@ -635,16 +684,54 @@ class Evaluator:
         # Learning Dynamics 分析数据收集 - 按数据集分别存储
         ld_by_dataset = {}  # {dataset_name: {'correct': {...}, 'incorrect': {...}, 'random': {...}}}
 
+        # 初始化样本计数器 - 按checkpoint-dataset组合动态收集
+        all_file_names = [
+            os.path.splitext(os.path.basename(file_path))[0]
+            for file_path in self.cfg.eval_prompt_data
+        ]
+        dataset_counters = {
+            dataset_name: {
+                'correct': 0,
+                'incorrect': 0,
+                'random': 0,
+                'total_evaluated': 0,
+                'completed': False  # 是否已满足条件
+            }
+            for dataset_name in all_file_names
+        }
+
         for batch in dataloader:
             prompts = list(batch[0])
             answers = list(batch[1]["answer"])
             file_names = list(batch[1]["file_name"])
 
-            logger.info(f"Processing {len(prompts)} prompts (DEBUG MODE)")
+            logger.info(f"Processing {len(prompts)} prompts")
 
             # 对每个 prompt 进行生成和分析
             for sample_idx, (prompt, answer, file_name) in enumerate(zip(prompts, answers, file_names)):
+                # 检查该数据集是否已完成收集
+                if dataset_counters[file_name]['completed']:
+                    logger.info(f"Skipping {file_name} sample {sample_idx + 1}/{len(prompts)} (collection completed)")
+                    continue
+
+                # 检查是否满足最小样本数量要求
+                if (dataset_counters[file_name]['correct'] >= self.cfg.min_correct_samples and
+                    dataset_counters[file_name]['incorrect'] >= self.cfg.min_incorrect_samples):
+                    dataset_counters[file_name]['completed'] = True
+                    logger.info(f"Dataset {file_name} completed: {dataset_counters[file_name]['correct']} correct, "
+                                f"{dataset_counters[file_name]['incorrect']} incorrect samples collected")
+                    continue
+
+                # 检查是否达到上限（安全保护）
+                if dataset_counters[file_name]['total_evaluated'] >= self.cfg.max_eval_samples:
+                    dataset_counters[file_name]['completed'] = True
+                    logger.warning(f"Dataset {file_name} reached max samples limit {self.cfg.max_eval_samples}")
+                    continue
+
+                logger.info(f"\n{'='*80}")
                 logger.info(f"Sample {sample_idx + 1}/{len(prompts)}")
+                logger.info(f"Dataset: {file_name}")
+                logger.info(f"{'='*80}")
 
                 # 1. Tokenize prompt
                 prompt_inputs = self.tokenizer(prompt, return_tensors="pt", padding=True)
@@ -661,7 +748,7 @@ class Evaluator:
                         temperature=self.cfg.temperature,
                         top_p=self.cfg.top_p,
                         top_k=self.cfg.top_k if self.cfg.top_k > 0 else None,
-                        do_sample=True,
+                        do_sample=self.cfg.do_sample,
                         return_dict_in_generate=False,
                         pad_token_id=self.tokenizer.eos_token_id,
                     )
@@ -685,7 +772,6 @@ class Evaluator:
                 logger.info(f"Logits shape: {logits.shape}")
 
                 # 5. Prepare labels for learning dynamics calculation
-                # 使用 prompt 长度作为分界线
                 prompt_len = prompt_input_ids.shape[1]
                 labels = generated_ids.clone().unsqueeze(0)
                 labels[:, :prompt_len] = -100  # mask 掉 prompt 部分
@@ -703,6 +789,13 @@ class Evaluator:
                 logger.info(f"Final Answer: {final_answer}")
                 logger.info(f"Is Correct: {iscorrect}")
 
+                # 更新样本计数器
+                dataset_counters[file_name]['total_evaluated'] += 1
+                if iscorrect:
+                    dataset_counters[file_name]['correct'] += 1
+                else:
+                    dataset_counters[file_name]['incorrect'] += 1
+
                 output_for_save.append(
                     dict(
                         prompt=prompt,
@@ -715,19 +808,19 @@ class Evaluator:
                 )
 
                 # ============================================================
-                # Learning Dynamics 分析（DEBUG 版本）
+                # Learning Dynamics 分析
                 # ============================================================
-                logger.info("Learning Dynamics Analysis (DEBUG mode - Transformers)")
+                logger.info("Learning Dynamics Analysis")
 
                 ld_metrics = None
                 if labels is not None:
                     try:
-                        # 调用分析函数（logits 会内部转换为 logprobs）
+                        # 调用分析函数
                         ld_result = analyze_learning_dynamics(
                             logits=logits,
                             labels=labels,
                             tokenizer=self.tokenizer,
-                            verbose=True  # 详细模式，用于 debug
+                            verbose=False
                         )
 
                         # 提取关键指标
@@ -783,13 +876,13 @@ class Evaluator:
                         output_for_save[-1]['ld_metrics'] = ld_metrics
 
                         # ========================================================
-                        # 随机采样 token 及对应的学习动态分析
+                        # 随机采样 token 及对应的 logits
                         # ========================================================
                         sampled_tokens = self._sample_random_tokens(
                             logits=logits,
                             labels=labels,
                             token_ids=token_ids,
-                            num_samples=5
+                            num_samples=5  # 随机采样 5 个 token
                         )
 
                         if sampled_tokens is not None:
@@ -817,15 +910,51 @@ class Evaluator:
                                     ld_by_dataset[file_name]['random']['prob_gap2_mean'].append(ld_result_pos['per_sample']['prob_gap2_mean'][0])
                                     ld_by_dataset[file_name]['random']['prob_energy'].append(ld_result_pos['per_sample']['prob_energy'][0])
 
+                                    # 更新随机采样计数
+                                    dataset_counters[file_name]['random'] += 1
+
                                 except Exception as e:
                                     logger.warning(f"Failed to compute learning dynamics for sampled token at position {pos}: {e}")
 
+                        # 检查该数据集是否已满足所有条件
+                        counter = dataset_counters[file_name]
+                        if (counter['correct'] >= self.cfg.min_correct_samples and
+                            counter['incorrect'] >= self.cfg.min_incorrect_samples and
+                            counter['random'] >= self.cfg.min_random_samples):
+                            dataset_counters[file_name]['completed'] = True
+                            logger.info(f"✅ {file_name}: 所有类别已满足最小样本数要求")
+                            logger.info(f"   ✓ 正确答案: {counter['correct']}/{self.cfg.min_correct_samples}")
+                            logger.info(f"   ✓ 错误答案: {counter['incorrect']}/{self.cfg.min_incorrect_samples}")
+                            logger.info(f"   ✓ 随机token: {counter['random']}/{self.cfg.min_random_samples}")
+
                     except Exception as e:
                         logger.warning(f"Failed to compute learning dynamics: {e}")
-                        import traceback
-                        traceback.print_exc()
 
                 logger.info(f"{'='*80}\n")
+
+        # Calculate metrics per dataset
+        all_file_names = [
+            os.path.splitext(os.path.basename(file_path))[0]
+            for file_path in self.cfg.eval_prompt_data
+        ]
+
+        for file_name in all_file_names:
+            if log_dict[f"{file_name}/total"] > 0:
+                log_dict[f"{file_name}/response_len_in_char"] = (
+                    log_dict[f"{file_name}/total_response_len_in_char"]
+                    / log_dict[f"{file_name}/total"]
+                )
+                log_dict[f"{file_name}/accuracy"] = (
+                    log_dict[f"{file_name}/correct"] / log_dict[f"{file_name}/total"]
+                )
+                log_dict.pop(f"{file_name}/total_response_len_in_char")
+                log_dict.pop(f"{file_name}/correct")
+                log_dict.pop(f"{file_name}/total")
+
+        # Calculate average accuracy
+        accuracies = [log_dict[f"{fn}/accuracy"] for fn in all_file_names if f"{fn}/accuracy" in log_dict]
+        if accuracies:
+            log_dict["eval_accuracy"] = sum(accuracies) / len(accuracies)
 
         # ====================================================================
         # 计算 Learning Dynamics 统计 - 按数据集分别
@@ -858,27 +987,73 @@ class Evaluator:
                 log_dict[f"{dataset_name}/ld_random/prob_energy"] = float(np.mean(dataset_ld['random']['prob_energy']))
                 log_dict[f"{dataset_name}/ld_random/count"] = len(dataset_ld['random']['out_token'])
 
+        # ====================================================================
+        # 样本收集统计报告
+        # ====================================================================
+        logger.info("\n" + "="*80)
+        logger.info("【样本收集统计报告】")
+        logger.info("="*80)
+        for dataset_name in all_file_names:
+            counter = dataset_counters[dataset_name]
+            logger.info(f"\n【{dataset_name}】")
+            logger.info(f"  已评估样本数: {counter['total_evaluated']}/{self.cfg.max_eval_samples}")
+            logger.info(f"  正确答案: {counter['correct']}/{self.cfg.min_correct_samples}", end="")
+            if counter['correct'] >= self.cfg.min_correct_samples:
+                logger.info(" ✅")
+            else:
+                logger.info(" ⚠️ (不足)")
+
+            logger.info(f"  错误答案: {counter['incorrect']}/{self.cfg.min_incorrect_samples}", end="")
+            if counter['incorrect'] >= self.cfg.min_incorrect_samples:
+                logger.info(" ✅")
+            else:
+                logger.info(" ⚠️ (不足)")
+
+            logger.info(f"  随机token: {counter['random']}/{self.cfg.min_random_samples}", end="")
+            if counter['random'] >= self.cfg.min_random_samples:
+                logger.info(" ✅")
+            else:
+                logger.info(" ⚠️ (不足)")
+
+            # 判断是否可信
+            if (counter['correct'] >= self.cfg.min_correct_samples and
+                counter['incorrect'] >= self.cfg.min_incorrect_samples and
+                counter['random'] >= self.cfg.min_random_samples):
+                logger.info(f"  📊 样本数充足，统计结果可信")
+            else:
+                logger.warning(f"  ⚠️ 部分类别样本不足，统计结果仅供参考")
+
+        logger.info("="*80 + "\n")
+
         # Output Learning Dynamics summary by dataset
         for dataset_name, dataset_ld in ld_by_dataset.items():
             if dataset_ld['correct']['out_token'] or dataset_ld['incorrect']['out_token']:
-                logger.info(f"Learning Dynamics summary for {dataset_name}")
+                logger.info(f"\n={'='*80}")
+                logger.info(f"【{dataset_name} - Learning Dynamics 分析摘要】")
+                logger.info(f"{'='*80}")
 
                 if dataset_ld['correct']['out_token']:
                     logger.info(f"Correct answers (n={len(dataset_ld['correct']['out_token'])})")
-                    logger.info(f"  Energy (prob_energy): {float(np.mean(dataset_ld['correct']['prob_energy'])):.4f}")
-                    logger.info(f"  Gap (prob_gap2_mean): {float(np.mean(dataset_ld['correct']['prob_gap2_mean'])):.4f}")
-                    logger.info(f"  A_norm: {float(np.mean(dataset_ld['correct']['A_norm'])):.4f}")
+                    logger.info(f"  Energy (prob_energy): {log_dict[f'{dataset_name}/ld_correct/prob_energy']:.4f}")
+                    logger.info(f"  Gap (prob_gap2_mean): {log_dict[f'{dataset_name}/ld_correct/prob_gap2_mean']:.4f}")
+                    logger.info(f"  A_norm: {log_dict[f'{dataset_name}/ld_correct/A_norm']:.4f}")
+                    logger.info(f"  out_token: {log_dict[f'{dataset_name}/ld_correct/out_token']:.4f}")
+                    logger.info(f"  out_argmax: {log_dict[f'{dataset_name}/ld_correct/out_argmax']:.4f}")
 
                 if dataset_ld['incorrect']['out_token']:
                     logger.info(f"Incorrect answers (n={len(dataset_ld['incorrect']['out_token'])})")
-                    logger.info(f"  Energy (prob_energy): {float(np.mean(dataset_ld['incorrect']['prob_energy'])):.4f}")
-                    logger.info(f"  Gap (prob_gap2_mean): {float(np.mean(dataset_ld['incorrect']['prob_gap2_mean'])):.4f}")
-                    logger.info(f"  A_norm: {float(np.mean(dataset_ld['incorrect']['A_norm'])):.4f}")
+                    logger.info(f"  Energy (prob_energy): {log_dict[f'{dataset_name}/ld_incorrect/prob_energy']:.4f}")
+                    logger.info(f"  Gap (prob_gap2_mean): {log_dict[f'{dataset_name}/ld_incorrect/prob_gap2_mean']:.4f}")
+                    logger.info(f"  A_norm: {log_dict[f'{dataset_name}/ld_incorrect/A_norm']:.4f}")
+                    logger.info(f"  out_token: {log_dict[f'{dataset_name}/ld_incorrect/out_token']:.4f}")
+                    logger.info(f"  out_argmax: {log_dict[f'{dataset_name}/ld_incorrect/out_argmax']:.4f}")
 
                 if dataset_ld['correct']['out_token'] and dataset_ld['incorrect']['out_token']:
                     logger.info("Comparison")
-                    energy_diff = float(np.mean(dataset_ld['incorrect']['prob_energy'])) - float(np.mean(dataset_ld['correct']['prob_energy']))
+                    energy_diff = log_dict[f'{dataset_name}/ld_incorrect/prob_energy'] - log_dict[f'{dataset_name}/ld_correct/prob_energy']
+                    gap_diff = log_dict[f'{dataset_name}/ld_incorrect/prob_gap2_mean'] - log_dict[f'{dataset_name}/ld_correct/prob_gap2_mean']
                     logger.info(f"  Energy difference (incorrect - correct): {energy_diff:.4f}")
+                    logger.info(f"  Gap difference (incorrect - correct): {gap_diff:.4f}")
                     if energy_diff > 0:
                         logger.info("  Incorrect answers need more learning energy (model less confident)")
                     else:
@@ -886,12 +1061,14 @@ class Evaluator:
 
                 if dataset_ld['random']['out_token']:
                     logger.info(f"Random sampled tokens (n={len(dataset_ld['random']['out_token'])})")
-                    logger.info(f"  Energy (prob_energy): {float(np.mean(dataset_ld['random']['prob_energy'])):.4f}")
-                    logger.info(f"  Gap (prob_gap2_mean): {float(np.mean(dataset_ld['random']['prob_gap2_mean'])):.4f}")
-                    logger.info(f"  A_norm: {float(np.mean(dataset_ld['random']['A_norm'])):.4f}")
+                    logger.info(f"  Energy (prob_energy): {log_dict[f'{dataset_name}/ld_random/prob_energy']:.4f}")
+                    logger.info(f"  Gap (prob_gap2_mean): {log_dict[f'{dataset_name}/ld_random/prob_gap2_mean']:.4f}")
+                    logger.info(f"  A_norm: {log_dict[f'{dataset_name}/ld_random/A_norm']:.4f}")
 
-                # Generate visualization for each dataset
-                if self.cfg.enable_visualization:
+        # Generate Learning Dynamics visualization - one chart per dataset
+        if self.cfg.enable_visualization:
+            for dataset_name, dataset_ld in ld_by_dataset.items():
+                if dataset_ld['correct']['out_token'] or dataset_ld['incorrect']['out_token']:
                     try:
                         figure_path = self._visualize_learning_dynamics(
                             dataset_ld['correct'],
@@ -904,11 +1081,17 @@ class Evaluator:
                     except Exception as e:
                         logger.warning(f"Failed to generate {dataset_name} visualization: {e}")
 
-
         # Save results if requested
         if self.cfg.save_detailed_results:
             os.makedirs(self.cfg.output_dir, exist_ok=True)
-            dump_file_name = "eval_results_debug.jsonl"
+
+            # Generate result filename
+            dump_file_name = "eval_results"
+            for file_name in all_file_names:
+                if f"{file_name}/accuracy" in log_dict:
+                    dump_file_name += f"_{file_name}_{log_dict[f'{file_name}/accuracy']:.4f}"
+            dump_file_name += ".jsonl"
+
             result_path = os.path.join(self.cfg.output_dir, dump_file_name)
             logger.info(f"Saving evaluation results to {result_path}")
             with open(result_path, "w") as f:
@@ -938,6 +1121,10 @@ class Evaluator:
 
                     serializable_item = convert_to_serializable(item)
                     f.write(json.dumps(serializable_item, ensure_ascii=False) + "\n")
+
+        # Log results
+        logging_str = ",".join([f"{k}: {v:.4f}" for k, v in log_dict.items()])
+        logger.info(f"Evaluation completed: {logging_str}")
 
         # ====================================================================
         # 自定义语句分析（如果提供）
@@ -978,6 +1165,81 @@ class Evaluator:
 
         return dict(log_dict)
 
+    def _sample_random_tokens(self, logits, labels, token_ids, num_samples=5):
+        """
+        从生成的序列中随机采样 token 及其对应的 logits
+
+        Args:
+            logits: torch.FloatTensor, shape (1, seq_len, vocab_size)
+            labels: torch.LongTensor, shape (1, seq_len)
+            token_ids: list of generated token IDs
+            num_samples: 采样的 token 数量（默认 5）
+
+        Returns:
+            sampled_data: 字典，包含采样的 token 信息
+                {
+                    'sample_positions': [pos1, pos2, ...],
+                    'sample_tokens': [token_id1, token_id2, ...],
+                    'sample_logits': [logits_vector_1, logits_vector_2, ...],  # 每个都是完整的 vocab_size 维度
+                    'sample_token_names': ['token_name1', 'token_name2', ...],
+                }
+        """
+        import random
+
+        if logits is None or labels is None or token_ids is None:
+            return None
+
+        seq_len = len(token_ids)
+
+        # 有效位置数（非 -100 mask）
+        valid_positions = [i for i in range(seq_len) if i < labels.shape[1] and labels[0, i] != -100]
+
+        if len(valid_positions) == 0:
+            return None
+
+        # 确定实际采样数量
+        actual_samples = min(num_samples, len(valid_positions))
+
+        # 随机采样位置
+        sampled_positions = sorted(random.sample(valid_positions, actual_samples))
+
+        sampled_data = {
+            'sample_positions': sampled_positions,
+            'sample_tokens': [],
+            'sample_logits': [],
+            'sample_logprobs': [],  # log 概率
+            'sample_token_names': [],
+            'sample_token_probs': [],  # 实际概率
+        }
+
+        for pos in sampled_positions:
+            token_id = int(token_ids[pos])
+
+            # 获取完整的 logits 向量（所有 vocab）
+            logit_vector = logits[0, pos, :].detach().cpu()
+
+            # 计算该位置的 log 概率和概率
+            log_probs = torch.nn.functional.log_softmax(logit_vector, dim=-1)
+            probs = torch.softmax(logit_vector, dim=-1)
+
+            # 获取该 token 的 log 概率
+            token_logprob = log_probs[token_id].item()
+            token_prob = probs[token_id].item()
+
+            # 获取 token 名称
+            try:
+                token_name = self.tokenizer.decode([token_id]).strip()
+            except:
+                token_name = f"<unk_token_{token_id}>"
+
+            sampled_data['sample_tokens'].append(token_id)
+            sampled_data['sample_logits'].append(logit_vector.numpy().tolist())  # 完整 logits 向量
+            sampled_data['sample_logprobs'].append(token_logprob)
+            sampled_data['sample_token_names'].append(token_name)
+            sampled_data['sample_token_probs'].append(token_prob)
+
+        return sampled_data
+
     def _visualize_learning_dynamics(self, ld_correct_samples, ld_incorrect_samples, ld_random_tokens=None, dataset_name="All"):
         """
         Generate comparison bar chart for learning dynamics metrics
@@ -993,6 +1255,7 @@ class Evaluator:
             logger.warning(f"No learning dynamics data to visualize for {dataset_name}")
             return None
 
+        # 5 key metrics
         metrics = ['out_token', 'out_argmax', 'A_norm', 'prob_gap2_mean', 'prob_energy']
         metric_labels = {
             'out_token': 'True Label\nLog Probability',
@@ -1002,6 +1265,7 @@ class Evaluator:
             'prob_energy': 'Pull-up Energy\n(Correction Strength)',
         }
 
+        # Calculate mean and std for each metric
         correct_means = []
         correct_stds = []
         incorrect_means = []
@@ -1010,6 +1274,7 @@ class Evaluator:
         random_stds = []
 
         for metric in metrics:
+            # Correct answers
             if ld_correct_samples[metric]:
                 correct_means.append(float(np.mean(ld_correct_samples[metric])))
                 correct_stds.append(float(np.std(ld_correct_samples[metric])))
@@ -1017,6 +1282,7 @@ class Evaluator:
                 correct_means.append(0)
                 correct_stds.append(0)
 
+            # Incorrect answers
             if ld_incorrect_samples[metric]:
                 incorrect_means.append(float(np.mean(ld_incorrect_samples[metric])))
                 incorrect_stds.append(float(np.std(ld_incorrect_samples[metric])))
@@ -1024,7 +1290,7 @@ class Evaluator:
                 incorrect_means.append(0)
                 incorrect_stds.append(0)
 
-            # 随机 tokens 数据（可选）
+            # Random tokens（可选）
             if ld_random_tokens and ld_random_tokens[metric]:
                 random_means.append(float(np.mean(ld_random_tokens[metric])))
                 random_stds.append(float(np.std(ld_random_tokens[metric])))
@@ -1032,7 +1298,9 @@ class Evaluator:
                 random_means.append(0)
                 random_stds.append(0)
 
+        # Create figure
         fig, ax = plt.subplots(figsize=(16, 8))
+
         x = np.arange(len(metrics))
 
         # 调整宽度以支持 3 组数据
@@ -1078,6 +1346,7 @@ class Evaluator:
             add_value_labels(bars1)
             add_value_labels(bars2)
 
+        # Set axes
         ax.set_xlabel('Learning Dynamics Metrics', fontsize=14, fontweight='bold')
         ax.set_ylabel('Metric Value', fontsize=14, fontweight='bold')
         ax.set_title(f'Learning Dynamics Comparison - {dataset_name}', fontsize=16, fontweight='bold', pad=20)
@@ -1086,6 +1355,7 @@ class Evaluator:
         ax.legend(fontsize=12, loc='upper left')
         ax.grid(axis='y', alpha=0.3, linestyle='--')
 
+        # Add sample count info
         correct_count = len(ld_correct_samples['out_token']) if ld_correct_samples['out_token'] else 0
         incorrect_count = len(ld_incorrect_samples['out_token']) if ld_incorrect_samples['out_token'] else 0
         random_count = len(ld_random_tokens['out_token']) if ld_random_tokens and ld_random_tokens['out_token'] else 0
@@ -1097,8 +1367,10 @@ class Evaluator:
 
         fig.text(0.5, 0.02, info_text, ha='center', fontsize=11, style='italic')
 
+        # Tight layout
         plt.tight_layout(rect=[0, 0.03, 1, 1])
 
+        # Save figure with dataset name to figures subdirectory
         figures_dir = os.path.join(self.cfg.output_dir, "figures")
         os.makedirs(figures_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1109,30 +1381,69 @@ class Evaluator:
         logger.info(f"Learning Dynamics visualization saved to: {figure_path}")
         return figure_path
 
+
     def cleanup(self):
         """清理资源"""
         logger.info("Cleaning up evaluator resources")
-        if hasattr(self, 'model') and self.model is not None:
+        if self.model is not None:
             del self.model
             torch.cuda.empty_cache()
         if ray.is_initialized():
             ray.shutdown()
         logger.info("Cleanup completed")
 
-if __name__ == "__main__":
-    # Debug evaluation mode - 快速测试（使用 transformers）
-    logger.info("Running in DEBUG evaluation mode (TRANSFORMERS)")
-    logger.info("This is a fast debug version with minimal samples")
-    logger.info("Using transformers for generation (not vLLM)")
 
-    checkpoint_path_list = [
+if __name__ == "__main__":
+    import argparse
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Evaluate model checkpoints with learning dynamics analysis")
+    parser.add_argument("--max_eval_samples", type=int, default=5000,
+                        help="Max number of samples to evaluate per dataset (default: 5000)")
+    parser.add_argument("--min_correct_samples", type=int, default=30,
+                        help="Minimum number of correct samples per dataset-checkpoint (default: 30)")
+    parser.add_argument("--min_incorrect_samples", type=int, default=10,
+                        help="Minimum number of incorrect samples per dataset-checkpoint (default: 10)")
+    parser.add_argument("--min_random_samples", type=int, default=10,
+                        help="Minimum number of random tokens per dataset-checkpoint (default: 10)")
+    parser.add_argument("--checkpoint_paths", nargs="+", default=[
         "/mnt/shared-storage-user/tangjia/orz_7b_ppo_jericho_1013/iter0/policy",
         "/mnt/shared-storage-user/tangjia/orz_7b_ppo_jericho_1013/iter45/policy",
         "/mnt/shared-storage-user/tangjia/orz_7b_ppo_jericho_1013/iter90/policy",
         "/mnt/shared-storage-user/tangjia/orz_7b_ppo_jericho_1013/iter180/policy",
-        # 可以添加更多 checkpoint 路径
-    ]
+    ], help="Checkpoint paths to evaluate (default: iter0, iter45, iter90, iter180)")
+    parser.add_argument("--output_dir", type=str, default="orz_dynamic_log",
+                        help="Output directory for results (default: orz_dynamic_log)")
+    parser.add_argument("--log_dir", type=str, default="orz_dynamic_log",
+                        help="Log directory name (default: orz_dynamic_log)")
+    parser.add_argument("--generate_max_len", type=int, default=8000,
+                        help="Maximum generation length (default: 8000)")
+    parser.add_argument("--temperature", type=float, default=1.0,
+                        help="Sampling temperature (default: 1.0)")
+    parser.add_argument("--top_p", type=float, default=1.0,
+                        help="Top-p sampling parameter (default: 1.0)")
+    parser.add_argument("--top_k", type=int, default=-1,
+                        help="Top-k sampling parameter (default: -1, disabled)")
 
+    args = parser.parse_args()
+
+    # Configure logging with custom log directory
+    log_dir = args.log_dir
+    os.makedirs(log_dir, exist_ok=True)
+    log_date = datetime.now().strftime("%Y%m%d")
+    logger.add(
+        os.path.join(log_dir, f"eval_{log_date}.log"),
+        rotation="00:00",
+        retention="30 days",
+        level="INFO",
+        encoding="utf-8",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+    )
+
+    logger.info("Running in evaluation mode (transformers)")
+    logger.info(f"Command line arguments: {args}")
+
+    checkpoint_path_list = args.checkpoint_paths
     all_model_results = {}
 
     for checkpoint_path in checkpoint_path_list:
@@ -1143,47 +1454,42 @@ if __name__ == "__main__":
         eval_config = EvaluatorConfig(
             model_path=checkpoint_path,
             tokenizer_path=checkpoint_path,
-            temperature=1.0,
-            top_p=1.0,
-            top_k=-1,
-            generate_max_len=256,  # 缩短以加快速度
-            eval_prompt_data=[  # [对齐] 默认包含 Jericho + math500 + aime2024 + gpqa_diamond
-                "data/eval_data/eval_jericho_dataset_his10_4games_1.8k_20251013_instruct.json",  # [对齐] 参考文件的 Jericho 数据
-                "data/eval_data/math500.json",  # [对齐] 完全对应
-                "data/eval_data/aime2024.json",  # [对齐] 完全对应
-                "data/eval_data/gpqa_diamond.json",  # [对齐] 完全对应
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            generate_max_len=args.generate_max_len,
+            eval_prompt_data=[
+                "data/eval_data/eval_jericho_dataset_his10_4games_1.8k_20251013_instruct.json",
+                "data/eval_data/math500.json",
+                "data/eval_data/aime2024.json",
+                "data/eval_data/gpqa_diamond.json",
             ],
             prompt_max_len=2048,
-            output_dir="eval_results_debug",
+            output_dir=args.output_dir,
+            log_dir=args.log_dir,
             save_detailed_results=True,
-            debug_num_samples=2,  # 仅处理 2 个样本
-            enable_visualization=True,
+            max_eval_samples=args.max_eval_samples,
+            min_correct_samples=args.min_correct_samples,
+            min_incorrect_samples=args.min_incorrect_samples,
+            min_random_samples=args.min_random_samples,
         )
         evaluator = Evaluator(eval_config)
 
         try:
             results = asyncio.run(evaluator.eval())
-            logger.info(f"Debug evaluation results for {checkpoint_path}: {results}")
+            logger.info(f"Evaluation results for {checkpoint_path}: {results}")
             all_model_results[checkpoint_path] = results
         finally:
             evaluator.cleanup()
 
-    # 汇总所有结果
-    logger.info(f"\n{'='*80}")
-    logger.info(f"【All Model Results Summary】")
-    logger.info(f"{'='*80}\n")
-    for checkpoint_path, results in all_model_results.items():
-        logger.info(f"\n【{checkpoint_path}】")
-        for key, value in results.items():
-            logger.info(f"  {key}: {value}")
-
+    # ====================================================================
+    # 【多 Checkpoint 趋势分析和可视化】
+    # ====================================================================
     logger.info("Multi-Checkpoint Learning Dynamics Trend Analysis")
 
-    # Aggregate results
     logger.info("Aggregating results from multiple checkpoints...")
     aggregated_data = aggregate_multi_checkpoint_results(all_model_results)
 
-    # Output summary statistics
     logger.info("Aggregated data statistics:")
     for dataset_name, dataset_data in aggregated_data.items():
         logger.info(f"  Dataset: {dataset_name}")
@@ -1192,10 +1498,7 @@ if __name__ == "__main__":
                 num_metrics = len(dataset_data[sample_type])
                 logger.info(f"    {sample_type}: {num_metrics} metrics")
 
-    # Generate trend visualization
     logger.info("Generating multi-checkpoint trends visualization...")
-    visualize_multi_checkpoint_trends(aggregated_data, output_dir="orz_dynamic_debug_log")
+    visualize_multi_checkpoint_trends(aggregated_data, output_dir="orz_dynamic_log")
 
     logger.info("All evaluations and visualizations completed!")
-
-
